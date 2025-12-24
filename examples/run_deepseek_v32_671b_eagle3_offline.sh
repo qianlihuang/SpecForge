@@ -13,7 +13,7 @@ torchrun \
     --standalone \
     --nproc_per_node $NUM_GPUS \
     scripts/prepare_hidden_states.py \
-    --target-model-path deepseek-ai/DeepSeek-V3 \
+    --target-model-path deepseek-ai/DeepSeek-V3.2 \
     --enable-aux-hidden-states \
     --data-path $ROOT_DIR/cache/dataset/perfect-blend.jsonl \
     --output-path $ROOT_DIR/cache/hidden_states/perfect-blend-deepseek-v32 \
@@ -28,7 +28,7 @@ torchrun \
     --standalone \
     --nproc_per_node $NUM_GPUS \
     $ROOT_DIR/scripts/train_eagle3.py \
-    --target-model-path deepseek-ai/DeepSeek-V3 \
+    --target-model-path deepseek-ai/DeepSeek-V3.2 \
     --draft-model-config $ROOT_DIR/configs/deepseek-v32-671b-eagle3.json \
     --train-data-path $ROOT_DIR/cache/dataset/perfect-blend.jsonl \
     --train-hidden-states-path $ROOT_DIR/cache/hidden_states/perfect-blend-deepseek-v32 \
