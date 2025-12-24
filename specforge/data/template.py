@@ -209,3 +209,18 @@ TEMPLATE_REGISTRY.register(
         parser_type="general",
     ),
 )
+
+# DeepSeek-V3.2 specific template — mirrors tokens used in
+# DeepSeek-V3.2/encoding/encoding_dsv32.py and tokenizer_config.json
+TEMPLATE_REGISTRY.register(
+    name="deepseek-v32",
+    template=ChatTemplate(
+        assistant_header="<｜Assistant｜>",
+        user_header="<｜User｜>",
+        system_prompt="",
+        end_of_turn_token="<｜end▁of▁sentence｜>",
+        bos_token="<｜begin▁of▁sentence｜>",
+        eos_token="<｜end▁of▁sentence｜>",
+        parser_type="general",
+    ),
+)

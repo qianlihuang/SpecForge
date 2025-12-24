@@ -17,7 +17,7 @@ torchrun \
     --enable-aux-hidden-states \
     --data-path $ROOT_DIR/cache/dataset/perfect-blend.jsonl \
     --output-path $ROOT_DIR/cache/hidden_states/perfect-blend-deepseek-v32 \
-    --chat-template deepseek-v3 \
+    --chat-template deepseek-v32 \
     --max-length 131072 \
     --tp-size 8 \
     --batch-size 4 \
@@ -40,5 +40,5 @@ torchrun \
     --target-model-backend sglang \
     --learning-rate 5e-5 \
     --max-length 131072 \
-    --chat-template deepseek-v3 \
+    --chat-template deepseek-v32 \
     --cache-dir $ROOT_DIR/cache

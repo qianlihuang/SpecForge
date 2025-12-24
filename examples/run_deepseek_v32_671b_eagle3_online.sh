@@ -24,7 +24,7 @@ torchrun \
     --batch-size 1 \
     --learning-rate 5e-5 \
     --max-length 131072 \
-    --chat-template deepseek-v3 \
+    --chat-template deepseek-v32 \
     --cache-dir $ROOT_DIR/cache \
     --dist-timeout 60 \
     --sglang-mem-fraction-static 0.75
