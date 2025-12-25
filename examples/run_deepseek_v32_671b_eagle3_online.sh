@@ -23,8 +23,8 @@ torchrun \
     --num-epochs 10 \
     --batch-size 1 \
     --learning-rate 5e-5 \
-    --max-length 131072 \
-    --page-size 64 \
+    --max-length 16384 \
+    --sglang-page-size 64 \
     --chat-template deepseek-v32 \
     --cache-dir $ROOT_DIR/cache \
     --dist-timeout 60 \

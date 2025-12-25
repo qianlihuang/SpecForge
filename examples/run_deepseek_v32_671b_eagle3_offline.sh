@@ -18,10 +18,10 @@ torchrun \
     --data-path $ROOT_DIR/cache/dataset/perfect-blend.jsonl \
     --output-path $ROOT_DIR/cache/hidden_states/perfect-blend-deepseek-v32 \
     --chat-template deepseek-v32 \
-    --max-length 131072 \
+    --max-length 16384 \
     --tp-size 8 \
     --batch-size 4 \
-    --page-size 64 \
+    --sglang-page-size 64 \
     --sglang-mem-fraction-static 0.75
 
 # train eagle3 offline
