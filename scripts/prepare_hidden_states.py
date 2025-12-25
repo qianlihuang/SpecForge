@@ -166,16 +166,6 @@ def build_target_model(
         )
     else:
         target_model_kwargs = SGLangBackendArgs.from_args(args).to_kwargs()
-        # Ensure page_size is set to 64 for DeepSeek NSA models so NSATokenToKVPool init passes
-        try:
-            model_type = getattr(model_config, "model_type", "").lower()
-            arch0 = (
-                model_config.architectures[0] if hasattr(model_config, "architectures") and model_config.architectures else ""
-            )
-            if "deepseek" in model_type or "deepseek" in arch0.lower():
-                target_model_kwargs["page_size"] = 64
-        except Exception:
-            target_model_kwargs.setdefault("page_size", 64)
         target_model = get_eagle3_target_model(
             pretrained_model_name_or_path=args.target_model_path,
             backend="sglang",  # we set this as the default backend to minimize precision mismatch in training and serving

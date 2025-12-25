@@ -21,6 +21,7 @@ torchrun \
     --max-length 131072 \
     --tp-size 8 \
     --batch-size 4 \
+    --page-size 64 \
     --sglang-mem-fraction-static 0.75
 
 # train eagle3 offline
