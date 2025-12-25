@@ -40,6 +40,6 @@ torchrun \
     --tp-size $TP_SIZE \
     --target-model-backend sglang \
     --learning-rate 5e-5 \
-    --max-length 131072 \
+    --max-length 16384 \
     --chat-template deepseek-v32 \
     --cache-dir $ROOT_DIR/cache

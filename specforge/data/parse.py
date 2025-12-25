@@ -79,9 +79,21 @@ class GeneralParser(Parser):
                     break
                 messages.append(sentence)
 
-            conversation = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False, **kwargs
-            )
+            # Render conversation string directly from our ChatTemplate to avoid
+            # passing a ChatTemplate object into `tokenizer.apply_chat_template`,
+            # which can be unhashable and fail under multiprocessing.
+            parts = []
+            # Use system prompt if present (from data or template)
+            for msg in messages:
+                if msg["role"] == "system":
+                    parts.append(msg["content"])
+                    continue
+                if msg["role"] == "user":
+                    header = self.user_message_separator
+                else:
+                    header = self.assistant_message_separator
+                parts.append(f"{header}{msg['content']}")
+            conversation = "".join(parts)
 
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
