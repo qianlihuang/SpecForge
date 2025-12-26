@@ -275,6 +275,8 @@ TEMPLATE_REGISTRY.register(
         user_header="<｜User｜>",
         system_prompt="",
         end_of_turn_token="<｜end▁of▁sentence｜>",
+        parser_type="thinking",
+        enable_thinking=True,
     ),
 )
 
