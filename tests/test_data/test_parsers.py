@@ -123,7 +123,7 @@ class TestTemplatePreprocessing(unittest.TestCase):
 
     def test_deepseek_v32(self):
         """Test DeepSeek V3.2 template with correct special tokens"""
-        self._run_template_test("deepseek-ai/DeepSeek-V3", "deepseek-v32")
+        self._run_template_test("deepseek-ai/DeepSeek-V3.2", "deepseek-v32")
 
 
     def test_qwen3_thinking(self):

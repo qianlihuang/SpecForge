@@ -256,6 +256,16 @@ TEMPLATE_REGISTRY.register(
     ),
 )
 
+TEMPLATE_REGISTRY.register(
+    name="deepseek-v3",
+    template=ChatTemplate(
+        assistant_header="<｜Assistant｜>",
+        user_header="<｜User｜>",
+        system_prompt="You are a helpful assistant.",
+        end_of_turn_token="<｜end▁of▁sentence｜>",
+    ),
+)
+
 # DeepSeek-V3.2 specific template — mirrors tokens used in
 # DeepSeek-V3.2/encoding/encoding_dsv32.py and tokenizer_config.json
 TEMPLATE_REGISTRY.register(
