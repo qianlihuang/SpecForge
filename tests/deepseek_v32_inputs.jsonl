@@ -1,0 +1,2 @@
+{"conversations": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "What's the weather like today?"}], "enable_thinking": false}
+{"conversations": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "How would you solve this math problem?"}], "enable_thinking": true}
