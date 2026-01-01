@@ -81,21 +81,30 @@ class GeneralParser(Parser):
                     break
                 messages.append(sentence)
 
-            # Render conversation string directly from our ChatTemplate to avoid
-            # passing a ChatTemplate object into `tokenizer.apply_chat_template`,
-            # which can be unhashable and fail under multiprocessing.
-            parts = []
-            # Use system prompt if present (from data or template)
-            for msg in messages:
-                if msg["role"] == "system":
-                    parts.append(msg["content"])
-                    continue
-                if msg["role"] == "user":
-                    header = self.user_message_separator
-                else:
-                    header = self.assistant_message_separator
-                parts.append(f"{header}{msg['content']}")
-            conversation = "".join(parts)
+            # Try to use the tokenizer's chat template first; if unavailable,
+            # fall back to a manual rendering based on our ChatTemplate fields.
+            try:
+                conversation = self.apply_chat_template(messages, **kwargs)
+            except (ValueError, TypeError):
+                # Manual rendering for tokenizers without a chat_template
+                # Format: <BOS>system<User>user<Assistant>assistant<EOS><User>...
+                parts = []
+                bos_token = getattr(self.tokenizer, "bos_token", None)
+                user_header = self.chat_template.user_header or ""
+                assistant_header = self.chat_template.assistant_header or ""
+                end_of_turn = self.chat_template.end_of_turn_token or ""
+
+                for i, msg in enumerate(messages):
+                    if msg["role"] == "system":
+                        # System message: prepend BOS if available
+                        if bos_token:
+                            parts.append(bos_token)
+                        parts.append(msg["content"])
+                    elif msg["role"] == "user":
+                        parts.append(f"{user_header}{msg['content']}")
+                    elif msg["role"] == "assistant":
+                        parts.append(f"{assistant_header}{msg['content']}{end_of_turn}")
+                conversation = "".join(parts)
 
 
         if not self.tokenizer.pad_token_id:
