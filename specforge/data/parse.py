@@ -317,3 +317,187 @@ class ThinkingParser(GeneralParser):
         else:
             pass
         return super().parse(conversation, max_length, preformatted, **kwargs)
+
+
+class DeepSeekV32Parser(Parser):
+    """
+    Parser for DeepSeek-V3.2 model with thinking mode.
+    This parser manually constructs the chat template since the tokenizer
+    doesn't have a built-in chat_template.
+    
+    Format:
+    - BOS: <｜begin▁of▁sentence｜>
+    - User: <｜User｜>{content}<｜Assistant｜>
+    - Assistant (thinking): <think>{thinking}</think>{response}<｜end▁of▁sentence｜>
+    - Assistant (non-thinking): </think>{response}<｜end▁of▁sentence｜>
+    """
+    
+    # DeepSeek-V3.2 special tokens
+    BOS_TOKEN = "<｜begin▁of▁sentence｜>"
+    EOS_TOKEN = "<｜end▁of▁sentence｜>"
+    USER_HEADER = "<｜User｜>"
+    ASSISTANT_HEADER = "<｜Assistant｜>"
+    THINK_START = "<think>"
+    THINK_END = "</think>"
+    
+    def __init__(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate):
+        super().__init__(tokenizer, chat_template)
+        self.enable_thinking = chat_template.enable_thinking
+    
+    def _build_conversation_text(
+        self, 
+        messages: "Conversation", 
+        enable_thinking: bool = True
+    ) -> str:
+        """
+        Build the conversation text from messages following DeepSeek-V3.2 format.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+            enable_thinking: Whether thinking mode is enabled.
+        """
+        parts = [self.BOS_TOKEN]
+        
+        for i, msg in enumerate(messages):
+            role = msg.get("role")
+            content = msg.get("content", "")
+            
+            if role == "system":
+                # System message is placed at the beginning
+                if content:
+                    parts.append(content)
+            elif role == "user":
+                parts.append(f"{self.USER_HEADER}{content}{self.ASSISTANT_HEADER}")
+                # Add thinking start tag for thinking mode
+                if enable_thinking and i < len(messages) - 1:
+                    next_msg = messages[i + 1]
+                    if next_msg.get("role") == "assistant":
+                        # Check if assistant content has thinking
+                        assistant_content = next_msg.get("content", "")
+                        if assistant_content.startswith(self.THINK_START):
+                            pass  # Thinking content already includes <think>
+                        else:
+                            # Non-thinking response, add </think> prefix
+                            pass
+            elif role == "assistant":
+                # Check if content has explicit thinking tags
+                if content.startswith(self.THINK_START):
+                    # Content has explicit thinking, use as-is
+                    parts.append(f"{content}{self.EOS_TOKEN}")
+                elif enable_thinking:
+                    # Add </think> prefix for non-thinking in thinking mode
+                    parts.append(f"{self.THINK_END}{content}{self.EOS_TOKEN}")
+                else:
+                    # Non-thinking mode
+                    parts.append(f"{content}{self.EOS_TOKEN}")
+        
+        return "".join(parts)
+    
+    def parse(
+        self,
+        conversation: "Conversation",
+        max_length: int,
+        preformatted: bool = False,
+        **kwargs,
+    ) -> Dict[str, List[torch.Tensor]]:
+        """
+        Parse a conversation into tokenized input_ids and loss_mask.
+        
+        Args:
+            conversation: List of message dicts or pre-formatted string.
+            max_length: Maximum sequence length.
+            preformatted: Whether conversation is already formatted text.
+            
+        Returns:
+            Tuple of (input_ids tensor, loss_mask tensor)
+        """
+        enable_thinking = kwargs.get("enable_thinking", self.enable_thinking)
+        
+        if preformatted:
+            # If preformatted, use directly
+            if isinstance(conversation, str):
+                text = conversation
+            else:
+                text = str(conversation)
+        else:
+            # Build messages list
+            messages = []
+            
+            # Handle system prompt
+            if conversation and conversation[0]["role"] == "system":
+                messages.append(conversation[0])
+                conversation = conversation[1:]
+            elif self.chat_template.system_prompt:
+                messages.append({
+                    "role": "system", 
+                    "content": self.chat_template.system_prompt
+                })
+            
+            # Add remaining messages
+            convroles = ["user", "assistant"]
+            for j, sentence in enumerate(conversation):
+                role = sentence["role"]
+                if role != convroles[j % 2]:
+                    warnings.warn(
+                        f"Conversation truncated due to unexpected role '{role}'. "
+                        f"Expected '{convroles[j % 2]}'."
+                    )
+                    break
+                messages.append(sentence)
+            
+            text = self._build_conversation_text(messages, enable_thinking)
+        
+        # Tokenize
+        encoding = self.tokenizer(
+            text,
+            max_length=max_length,
+            truncation=True,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        input_ids = encoding.input_ids[0]
+        loss_mask = torch.zeros(len(input_ids), dtype=torch.long)
+        
+        # Find assistant spans for loss mask
+        # Pattern: <｜Assistant｜> ... <｜end▁of▁sentence｜>
+        # We want to mask the assistant response (after thinking if any)
+        
+        # For thinking mode: mask content after </think> until EOS
+        # For non-thinking mode: mask content after <｜Assistant｜> until EOS
+        
+        if enable_thinking:
+            # Find all </think>...EOS spans for loss
+            pattern = re.compile(
+                rf"{re.escape(self.THINK_END)}(.*?){re.escape(self.EOS_TOKEN)}",
+                re.DOTALL
+            )
+        else:
+            # Find all <｜Assistant｜>...EOS spans for loss
+            pattern = re.compile(
+                rf"{re.escape(self.ASSISTANT_HEADER)}(.*?){re.escape(self.EOS_TOKEN)}",
+                re.DOTALL
+            )
+        
+        for match in pattern.finditer(text):
+            content_start_char = match.start(1)
+            content_end_char = match.end(1) + len(self.EOS_TOKEN)  # Include EOS
+            
+            # Calculate token positions
+            prefix_ids = self.tokenizer.encode(
+                text[:content_start_char], add_special_tokens=False
+            )
+            full_ids = self.tokenizer.encode(
+                text[:content_end_char], add_special_tokens=False
+            )
+            
+            start_token_idx = len(prefix_ids)
+            end_token_idx = len(full_ids)
+            
+            # Handle truncation
+            actual_start = min(start_token_idx, len(input_ids))
+            actual_end = min(end_token_idx, len(input_ids))
+            
+            if actual_start < actual_end:
+                loss_mask[actual_start:actual_end] = 1
+        
+        return input_ids, loss_mask

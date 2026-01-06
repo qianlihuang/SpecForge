@@ -106,6 +106,7 @@ class AutoDistributedTargetModel(AutoModelForCausalLMBase):
     ):
         config = AutoConfig.from_pretrained(
             pretrained_model_name_or_path,
+            trust_remote_code=True,
         )
 
         if isinstance(config, Llama4Config):

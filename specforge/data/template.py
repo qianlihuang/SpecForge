@@ -273,7 +273,7 @@ TEMPLATE_REGISTRY.register(
         user_header="<｜User｜>",
         system_prompt="",
         end_of_turn_token="<｜end▁of▁sentence｜>",
-        parser_type="thinking",
+        parser_type="deepseek-v32",
         enable_thinking=True,
     ),
 )

@@ -87,6 +87,7 @@ class SGLangBackendArgs:
     sglang_piecewise_cuda_graph_max_tokens: int = 4096
     sglang_piecewise_cuda_graph_tokens: List[int] = None
     sglang_ep_size: int = 1
+    sglang_page_size: int = None
     sglang_max_running_requests: int = None  # assign based on batch size
     sglang_max_total_tokens: int = None  # assign based on batch size and seq length
 
@@ -161,6 +162,12 @@ class SGLangBackendArgs:
             default=1,
             help="The ep size of the SGLang backend",
         )
+        parser.add_argument(
+            "--sglang-page-size",
+            type=int,
+            default=None,
+            help="Page size for KV cache. Required for some models like DeepSeek-V3.2.",
+        )
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> "SGLangBackendArgs":
@@ -177,6 +184,7 @@ class SGLangBackendArgs:
             sglang_piecewise_cuda_graph_max_tokens=args.sglang_piecewise_cuda_graph_max_tokens,
             sglang_piecewise_cuda_graph_tokens=args.sglang_piecewise_cuda_graph_tokens,
             sglang_ep_size=args.sglang_ep_size,
+            sglang_page_size=getattr(args, "sglang_page_size", None),
             sglang_max_running_requests=(
                 args.target_batch_size if hasattr(args, "target_batch_size") else None
             ),
@@ -188,7 +196,7 @@ class SGLangBackendArgs:
         )
 
     def to_kwargs(self) -> Dict[str, Any]:
-        return dict(
+        kwargs = dict(
             attention_backend=self.sglang_attention_backend,
             mem_fraction_static=self.sglang_mem_fraction_static,
             context_length=self.sglang_context_length,
@@ -204,3 +212,7 @@ class SGLangBackendArgs:
             max_running_requests=self.sglang_max_running_requests,
             max_total_tokens=self.sglang_max_total_tokens,
         )
+        # Only add page_size if it's set (for models like DeepSeek-V3.2)
+        if self.sglang_page_size is not None:
+            kwargs["page_size"] = self.sglang_page_size
+        return kwargs

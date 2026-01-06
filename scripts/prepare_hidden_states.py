@@ -35,6 +35,7 @@ torchrun --nproc_per_node=8 \
 import argparse
 import gc
 import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -45,7 +46,7 @@ import torch
 import torch.distributed as dist
 from datasets import load_dataset
 from tqdm import tqdm
-from transformers import AutoConfig, AutoProcessor, AutoTokenizer
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PretrainedConfig
 
 from specforge.args import SGLangBackendArgs
 from specforge.data import build_eagle3_dataset, prepare_dp_dataloaders
@@ -549,7 +550,36 @@ def main():
     init_distributed(timeout=args.dist_timeout, tp_size=args.tp_size)
 
     # Build target model (with TP)
-    target_model_config = AutoConfig.from_pretrained(args.target_model_path)
+    # Try AutoConfig first, with fallback for models not registered in transformers
+    try:
+        target_model_config = AutoConfig.from_pretrained(
+            args.target_model_path, trust_remote_code=True
+        )
+    except (ValueError, KeyError) as e:
+        print_with_rank(
+            f"AutoConfig failed with: {e}. Trying to load config.json directly..."
+        )
+        # Fallback: try to read config.json directly and build a PretrainedConfig
+        from huggingface_hub import hf_hub_download
+        
+        try:
+            cfg_path = hf_hub_download(
+                repo_id=args.target_model_path, filename="config.json"
+            )
+        except Exception:
+            cfg_path = os.path.join(args.target_model_path, "config.json")
+        
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r") as f:
+                cfg_dict = json.load(f)
+            target_model_config = PretrainedConfig(**cfg_dict)
+            print_with_rank(f"Loaded config from {cfg_path}")
+        else:
+            raise RuntimeError(
+                f"Could not load config for {args.target_model_path}. "
+                "Please ensure the model path is valid."
+            )
+    
     target_model, processor = build_target_model(args, target_model_config)
 
     print_with_rank(

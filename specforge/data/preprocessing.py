@@ -41,7 +41,7 @@ except ImportError:
 
 from specforge.utils import padding
 
-from .parse import GeneralParser, HarmonyParser, ThinkingParser
+from .parse import DeepSeekV32Parser, GeneralParser, HarmonyParser, ThinkingParser
 from .template import TEMPLATE_REGISTRY, ChatTemplate
 
 # define a type called conversation
@@ -145,6 +145,8 @@ def preprocess_conversations(
         parser = ThinkingParser(tokenizer, chat_template)
     elif chat_template.parser_type == "openai-harmony":
         parser = HarmonyParser(tokenizer, chat_template)
+    elif chat_template.parser_type == "deepseek-v32":
+        parser = DeepSeekV32Parser(tokenizer, chat_template)
     else:
         raise ValueError(f"Invalid parser type: {chat_template.parser_type}")
 

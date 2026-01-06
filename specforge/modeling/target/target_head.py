@@ -5,17 +5,52 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 from safetensors import safe_open
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from specforge.utils import padding
+
+
+def load_config_with_fallback(model_path: str) -> PretrainedConfig:
+    """
+    Load config with fallback for models not registered in transformers.
+    
+    Args:
+        model_path: Path to model or HuggingFace repo ID
+        
+    Returns:
+        PretrainedConfig object
+    """
+    try:
+        return AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    except (ValueError, KeyError) as e:
+        # Fallback: try to read config.json directly
+        if os.path.exists(model_path):
+            cfg_path = os.path.join(model_path, "config.json")
+        else:
+            # Download from HuggingFace
+            try:
+                cfg_path = hf_hub_download(repo_id=model_path, filename="config.json")
+            except Exception:
+                raise RuntimeError(
+                    f"Could not load config for {model_path}. Error: {e}"
+                )
+        
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r") as f:
+                cfg_dict = json.load(f)
+            # Create a simple config object with the necessary attributes
+            config = PretrainedConfig(**cfg_dict)
+            return config
+        else:
+            raise RuntimeError(f"Could not find config.json at {cfg_path}")
 
 
 class TargetHead(nn.Module):
     def __init__(self, model_path):
         super().__init__()
-        self.config = AutoConfig.from_pretrained(model_path)
+        self.config = load_config_with_fallback(model_path)
         self.fc = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
 
     @classmethod

@@ -108,7 +108,9 @@ def generate_draft_model_config(
         dict: Generated draft model config dictionary
     """
     # Get target model config
-    target_config = AutoConfig.from_pretrained(target_model_path, cache_dir=cache_dir)
+    target_config = AutoConfig.from_pretrained(
+        target_model_path, cache_dir=cache_dir, trust_remote_code=True
+    )
 
     # If no template specified, use default llama3-8B-eagle3.json
     if template_config_path is None:

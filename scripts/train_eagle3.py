@@ -390,7 +390,9 @@ def build_dataloaders(
     processor: Optional[AutoProcessor] = None,
 ) -> Tuple[DataLoader, str, Optional[DataLoader]]:
     # build dataloaders
-    tokenizer = AutoTokenizer.from_pretrained(args.target_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.target_model_path, trust_remote_code=True
+    )
 
     # convert to dataloader
     cache_params_string = (
