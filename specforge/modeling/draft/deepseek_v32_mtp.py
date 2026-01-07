@@ -709,30 +709,70 @@ class DeepSeekV32MTPForCausalLM(Eagle3DraftModel):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        inputs_embeds: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        hidden_states: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        aux_hidden_states: Optional[List[torch.Tensor]] = None,
+        labels: Optional[torch.Tensor] = None,
         ttt_length: int = 1,
-    ) -> torch.Tensor:
+        **kwargs,
+    ):
         """
-        Full forward pass for direct use (not TTT training).
+        Forward pass supporting multiple use cases:
+        
+        1. Fine-tuning mode: input_ids + hidden_states (from target model's last layer)
+        2. EAGLE3 TTT mode: inputs_embeds + hidden_states (concatenated aux layers)
         
         Args:
-            hidden_states: Concatenated hidden states from aux layers (batch, seq_len, 3*hidden_size)
+            input_ids: Input token IDs (batch, seq_len)
+            hidden_states: Hidden states from target model
+                - For fine-tuning: (batch, seq_len, hidden_size) from last layer before MTP
+                - For EAGLE3 TTT: (batch, seq_len, 3*hidden_size) concatenated aux layers
             inputs_embeds: Input embeddings (batch, seq_len, hidden_size)
             attention_mask: Attention mask
+            aux_hidden_states: List of aux hidden states for EAGLE3 (optional)
+            labels: Labels for computing loss (optional)
             ttt_length: TTT length (for caching)
             
         Returns:
-            Output hidden states
+            CausalLMOutput with loss and logits
         """
+        from transformers.modeling_outputs import CausalLMOutputWithPast
+        
+        # Get embeddings
+        if inputs_embeds is None:
+            if input_ids is None:
+                raise ValueError("Either input_ids or inputs_embeds must be provided")
+            inputs_embeds = self.embed_tokens(input_ids)
+        
+        batch_size, seq_length, _ = inputs_embeds.size()
+        device = inputs_embeds.device
+        
+        # Handle hidden states
+        if hidden_states is None:
+            if aux_hidden_states is not None:
+                # EAGLE3 mode: concatenate aux hidden states
+                hidden_states = torch.cat(aux_hidden_states, dim=-1)
+            else:
+                raise ValueError("Either hidden_states or aux_hidden_states must be provided")
+        
+        # Check if we need to project (EAGLE3 3*hidden_size -> hidden_size)
+        if hidden_states.size(-1) == 3 * self.hidden_size:
+            projected_hidden = self.fc(hidden_states)
+        elif hidden_states.size(-1) == self.hidden_size:
+            # Direct hidden states from target model's last layer
+            projected_hidden = hidden_states
+        else:
+            raise ValueError(
+                f"Hidden states dimension {hidden_states.size(-1)} not supported. "
+                f"Expected {self.hidden_size} or {3 * self.hidden_size}"
+            )
+        
         if ttt_length == 1:
             cache_hidden = None
         else:
             cache_hidden = [[], []]
-        
-        batch_size, seq_length, _ = hidden_states.size()
-        device = hidden_states.device
         
         # Create position IDs
         position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
@@ -743,29 +783,44 @@ class DeepSeekV32MTPForCausalLM(Eagle3DraftModel):
             attention_mask = torch.ones((batch_size, seq_length), dtype=torch.bool, device=device)
         
         # Prepare causal mask
-        attention_mask = self.prepare_decoder_attention_mask(
+        causal_mask = self.prepare_decoder_attention_mask(
             attention_mask=attention_mask,
-            hidden_states=hidden_states,
+            hidden_states=inputs_embeds,
             batch_size=batch_size,
             seq_length=seq_length,
             past_key_values_length=0,
         )
         
-        # Project hidden states
-        hidden_states = self.fc(hidden_states)
-        
         # Forward through backbone
-        hidden_states = self.backbone(
+        output_hidden = self.backbone(
             input_embeds=inputs_embeds,
-            hidden_states=hidden_states,
+            hidden_states=projected_hidden,
             cache_hidden=cache_hidden,
-            attention_mask=attention_mask,
+            attention_mask=causal_mask,
             position_ids=position_ids,
             past_key_values=None,
             use_cache=False,
         )
         
-        # Final normalization
-        hidden_states = self.norm(hidden_states)
+        # Compute logits
+        logits = self.compute_logits(output_hidden)
         
-        return hidden_states
+        # Compute loss if labels provided
+        loss = None
+        if labels is not None:
+            # Shift logits and labels for next-token prediction
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            )
+        
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=None,
+            hidden_states=output_hidden,
+        )
