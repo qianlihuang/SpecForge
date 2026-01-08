@@ -1,10 +1,25 @@
 #!/bin/bash
 # Fine-tune DeepSeek-V3.2 MTP layer for EAGLE speculative decoding (Offline Mode)
 #
-# This script:
+# This script fine-tunes the FULL MTP layer (layer 61) including the decoder block,
+# ensuring architecture compatibility with vLLM-magik and SGLang inference.
+#
+# Architecture (training = inference):
+#   hidden_states (from layer 60) + input_ids
+#   -> enorm(embed), hnorm(hidden)
+#   -> eh_proj(concat)
+#   -> DecoderBlock (attention + MoE)  <-- Included for architecture match!
+#   -> norm -> lm_head -> logits
+#
+# Pipeline:
 # 1. Generates hidden states from the target model using SGLang
-# 2. Fine-tunes the MTP layer on the generated data
-# 3. Exports the model for vLLM-magik/SGLang deployment
+# 2. Fine-tunes the MTP layer (full or with frozen components)
+# 3. Exports the model for vLLM-magik/SGLang EAGLE deployment
+#
+# Training modes (set TRAINING_MODE env var):
+#   full        - Train full MTP layer (default, best quality)
+#   freeze_moe  - Train projection + attention, freeze MoE experts
+#   projection  - Train projection only (WARNING: architecture mismatch!)
 #
 # Usage: ./run_deepseek_v32_mtp_finetune_offline.sh [NUM_GPUS] [TP_SIZE]
 
@@ -29,9 +44,13 @@ NUM_EPOCHS=${NUM_EPOCHS:-3}
 BATCH_SIZE=${BATCH_SIZE:-1}
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
 MAX_LENGTH=${MAX_LENGTH:-2048}
+GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS:-1}
+
+# Training mode: full, freeze_moe, freeze_attention, or projection
+TRAINING_MODE=${TRAINING_MODE:-"full"}
 
 echo "============================================"
-echo "DeepSeek-V3.2 MTP Layer Fine-tuning"
+echo "DeepSeek-V3.2 MTP Layer Fine-tuning (Full Architecture)"
 echo "============================================"
 echo "NUM_GPUS: $NUM_GPUS"
 echo "TP_SIZE: $TP_SIZE"
@@ -44,6 +63,7 @@ echo "NUM_EPOCHS: $NUM_EPOCHS"
 echo "BATCH_SIZE: $BATCH_SIZE"
 echo "LEARNING_RATE: $LEARNING_RATE"
 echo "MAX_LENGTH: $MAX_LENGTH"
+echo "TRAINING_MODE: $TRAINING_MODE"
 echo "============================================"
 
 # Step 1: Generate hidden states
@@ -77,19 +97,45 @@ echo "============================================"
 
 # Step 2: Fine-tune MTP layer
 echo ""
-echo "[Step 2/3] Fine-tuning MTP layer..."
+echo "[Step 2/3] Fine-tuning MTP layer (mode: $TRAINING_MODE)..."
 echo "============================================"
 
-python $ROOT_DIR/scripts/train_mtp_layer.py \
+# Set training mode flags
+TRAIN_FLAGS=""
+case $TRAINING_MODE in
+    "full")
+        echo "Training FULL MTP layer (projection + attention + MoE)"
+        ;;
+    "freeze_moe")
+        TRAIN_FLAGS="--freeze-moe"
+        echo "Training with FROZEN MoE (projection + attention only)"
+        ;;
+    "freeze_attention")
+        TRAIN_FLAGS="--freeze-attention"
+        echo "Training with FROZEN attention (projection + MoE only)"
+        ;;
+    "projection")
+        TRAIN_FLAGS="--projection-only"
+        echo "WARNING: Training PROJECTION only - architecture mismatch with inference!"
+        ;;
+    *)
+        echo "Unknown training mode: $TRAINING_MODE"
+        echo "Valid modes: full, freeze_moe, freeze_attention, projection"
+        exit 1
+        ;;
+esac
+
+python $ROOT_DIR/scripts/train_mtp_full.py \
     --target-model-path $TARGET_MODEL_PATH \
-    --train-data-path $DATA_PATH \
-    --train-hidden-states-path $HIDDEN_STATES_PATH \
+    --hidden-states-path $HIDDEN_STATES_PATH \
     --output-dir $OUTPUT_DIR \
     --num-epochs $NUM_EPOCHS \
     --batch-size $BATCH_SIZE \
     --learning-rate $LEARNING_RATE \
+    --gradient-accumulation-steps $GRADIENT_ACCUMULATION_STEPS \
     --log-interval 1 \
-    --save-interval 1
+    --save-interval 1 \
+    $TRAIN_FLAGS
 
 echo ""
 echo "[Step 2/3] Fine-tuning completed!"
@@ -100,8 +146,8 @@ echo ""
 echo "[Step 3/3] Exporting model for EAGLE deployment..."
 echo "============================================"
 
-python $ROOT_DIR/scripts/export_mtp_model.py \
-    --input-dir $OUTPUT_DIR/checkpoint-epoch-$NUM_EPOCHS \
+python $ROOT_DIR/scripts/export_mtp_model_full.py \
+    --checkpoint-dir $OUTPUT_DIR/checkpoint-epoch-$NUM_EPOCHS \
     --target-model-path $TARGET_MODEL_PATH \
     --output-dir $EXPORT_DIR
 

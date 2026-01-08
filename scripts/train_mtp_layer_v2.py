@@ -71,22 +71,23 @@ class MTPProjectionModel(nn.Module):
     """
     MTP projection-only model for fine-tuning.
     
-    This model contains ONLY the trainable projection components:
-    - embed_tokens: Embedding layer (frozen, loaded from target)
-    - enorm: RMSNorm for embeddings
-    - hnorm: RMSNorm for hidden states  
-    - eh_proj: Projection layer
-    - norm: Output RMSNorm
-    - lm_head: Output projection
+    IMPORTANT: This model trains ONLY projection components (enorm, hnorm, eh_proj, norm, lm_head)
+    while SKIPPING the decoder block. This creates an ARCHITECTURE MISMATCH with inference!
     
-    The decoder block (attention + MoE) is NOT included.
-    This model learns to predict the next token directly from the projected hidden states,
-    which can then be combined with the frozen decoder block at inference time.
+    At TRAINING time:
+        logits = lm_head(norm(eh_proj(concat[enorm(embed), hnorm(hidden)])))
     
-    Training objective: next token prediction
-    - Input: hidden_states from the target model (after all regular layers + norm)
-    - Input: input token IDs
-    - Output: logits for next token
+    At INFERENCE time (vLLM/SGLang):
+        logits = lm_head(norm(DECODER_BLOCK(eh_proj(concat[enorm(embed), hnorm(hidden)]))))
+    
+    This mismatch means the trained weights may not work well at inference.
+    
+    RECOMMENDED: Use train_mtp_full.py instead for full MTP layer training, OR
+    use train_mtp_full.py with --freeze-moe flag to freeze MoE but still include
+    the decoder block in the forward pass.
+    
+    This script is kept for reference and for cases where you want lightweight
+    projection-only adaptation as a starting point.
     """
     
     def __init__(self, config):
@@ -117,9 +118,7 @@ class MTPProjectionModel(nn.Module):
         """
         Forward pass for MTP projection training.
         
-        Note: This skips the decoder block. The model learns to predict directly
-        from the projected hidden states. At inference, the decoder block from
-        the original model will be applied between eh_proj and norm/lm_head.
+        WARNING: This skips the decoder block! See class docstring for details.
         """
         # Get embeddings for input tokens
         inputs_embeds = self.embed_tokens(input_ids)
@@ -132,9 +131,7 @@ class MTPProjectionModel(nn.Module):
         combined = torch.cat([inputs_embeds, hidden_normed], dim=-1)
         projected = self.eh_proj(combined)
         
-        # Output (skipping decoder block)
-        # At inference, decoder_output = decoder_block(projected)
-        # Here we directly predict from projected for training
+        # Output (SKIPPING decoder block - causes mismatch!)
         output = self.norm(projected)
         logits = self.lm_head(output)
         
