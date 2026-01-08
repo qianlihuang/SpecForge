@@ -94,15 +94,29 @@ def parse_args():
 
 
 def create_mtp_config(target_config: dict) -> dict:
-    """Create MTP model config compatible with vLLM-magik."""
+    """Create MTP model config compatible with vLLM-magik.
+    
+    Note: We use model_type="deepseek_v32" instead of "deepseek_mtp" because
+    vLLM-magik's SpeculativeConfig.hf_config_override() expects deepseek_v32/v3
+    and transforms it to deepseek_mtp internally. Using deepseek_mtp directly
+    causes Transformers AutoConfig to fail since it doesn't recognize that type.
+    
+    Important: num_hidden_layers must match the target model's layer count (61)
+    because vLLM's EagleDeepseekV3ForCausalLM uses it as the start_layer_id when
+    num_nextn_predict_layers is present. The weights are only for the MTP layer
+    but the config tells vLLM which layer index to load them into.
+    """
+    # Get target model's layer count - needed for vLLM to compute start_layer_id
+    target_num_layers = target_config.get("num_hidden_layers", 61)
+    
     return {
         "architectures": ["DeepSeekMTPModel"],
-        "model_type": "deepseek_mtp",
+        "model_type": "deepseek_v32",  # vLLM will convert this to deepseek_mtp
         "vocab_size": target_config.get("vocab_size", 129280),
         "hidden_size": target_config.get("hidden_size", 7168),
         "intermediate_size": target_config.get("intermediate_size", 18432),
         "moe_intermediate_size": target_config.get("moe_intermediate_size", 2048),
-        "num_hidden_layers": 1,
+        "num_hidden_layers": target_num_layers,  # Must match target model!
         "num_nextn_predict_layers": 1,
         "num_attention_heads": target_config.get("num_attention_heads", 128),
         "num_key_value_heads": target_config.get("num_key_value_heads", 128),
