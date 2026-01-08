@@ -145,23 +145,29 @@ def build_target_model(args, model_config):
         **target_model_kwargs,
     )
     
-    # For MTP training, we need hidden state from layer 59 (before MTP layer 60)
-    # DeepSeek-V3.2 has 61 layers (0-60), where layer 60 is the MTP layer
-    # We need the output of layer 59 as input to MTP layer
-    num_layers = model_config.num_hidden_layers  # Should be 61 for DeepSeek-V3.2
+    # For MTP training, we need the FINAL hidden states (after all layers and norm)
+    # This is different from EAGLE3 which needs intermediate layer hidden states
+    #
+    # DeepSeek-V3.2 architecture:
+    # - num_hidden_layers = 61 (config value)
+    # - Layers 0-60 are regular decoder layers
+    # - Layer 61 is the MTP layer (with enorm, hnorm, eh_proj, shared_head)
+    #
+    # For MTP training:
+    # - We need the output AFTER all decoder layers (0-60) and final norm
+    # - This is the final hidden_states that goes to lm_head
+    # - We use return_last_hidden_states=True instead of aux_hidden_states
+    #
+    # NOTE: We do NOT call set_eagle3_layers_to_capture() because:
+    # 1. EAGLE3's layers_to_capture captures BEFORE a layer processes (input to layer)
+    # 2. For MTP, we need AFTER all layers process (output of final layer + norm)
+    # 3. The model's final hidden_states is exactly what we need
     
-    # Note: For DeepSeek with MTP, the config says 61 layers but layer 60 is special (MTP)
-    # The main transformer is layers 0-59, and we need layer 59's output
-    mtp_input_layer = num_layers - 2  # Layer 59
+    num_layers = model_config.num_hidden_layers  # 61 for DeepSeek-V3.2
     
-    # For SGLang backend, we can set custom layers to capture
-    # We set only layer 59 to capture just the input to MTP layer
-    # The SGLang model's set_eagle3_layers_to_capture can handle any number of layers
-    target_model.model_runner.model.set_eagle3_layers_to_capture([mtp_input_layer])
-    target_model.aux_hidden_states_layers = [mtp_input_layer]
-    
-    print(f"[INFO] Target model has {num_layers} layers (including MTP layer)")
-    print(f"[INFO] Capturing hidden states from layer {mtp_input_layer} (input to MTP layer)")
+    print(f"[INFO] Target model has {num_layers} regular decoder layers")
+    print(f"[INFO] Using final hidden states (after all layers + norm) for MTP training")
+    print(f"[INFO] MTP layer index: {num_layers} (will be trained separately)")
     
     return target_model
 
