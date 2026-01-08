@@ -61,6 +61,120 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ============================================================================
+# FP8 Quantization Utilities
+# ============================================================================
+
+def dequantize_fp8_weight(
+    weight_fp8: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: int = 128,
+) -> torch.Tensor:
+    """
+    Dequantize FP8 weight to BF16 using block-wise scaling.
+    
+    DeepSeek-V3.2 uses block-wise FP8 quantization with block_size=128.
+    weight_fp8: [out_features, in_features] in FP8
+    scale_inv: [out_features/block_size, in_features/block_size] in FP32
+    
+    Returns: weight in BF16
+    """
+    out_features, in_features = weight_fp8.shape
+    scale_out_blocks, scale_in_blocks = scale_inv.shape
+    
+    # Calculate actual block sizes from scale_inv shape
+    # Note: DeepSeek uses ceil division, so last block may be smaller
+    out_block_size = (out_features + scale_out_blocks - 1) // scale_out_blocks
+    in_block_size = (in_features + scale_in_blocks - 1) // scale_in_blocks
+    
+    # Pad weight to be divisible by block sizes
+    pad_out = scale_out_blocks * out_block_size - out_features
+    pad_in = scale_in_blocks * in_block_size - in_features
+    
+    # Convert FP8 to FP32 first
+    weight_f32 = weight_fp8.to(torch.float32)
+    
+    if pad_out > 0 or pad_in > 0:
+        weight_f32 = torch.nn.functional.pad(weight_f32, (0, pad_in, 0, pad_out), value=0)
+    
+    # Reshape for block-wise operation
+    # [padded_out, padded_in] -> [scale_out_blocks, out_block_size, scale_in_blocks, in_block_size]
+    weight_reshaped = weight_f32.view(scale_out_blocks, out_block_size, scale_in_blocks, in_block_size)
+    
+    # Apply scale (scale_inv is the inverse scale, so we multiply)
+    # scale_inv: [scale_out_blocks, scale_in_blocks] -> [scale_out_blocks, 1, scale_in_blocks, 1]
+    scale_expanded = scale_inv.unsqueeze(1).unsqueeze(3)
+    weight_dequant = weight_reshaped * scale_expanded
+    
+    # Reshape back and remove padding
+    weight_dequant = weight_dequant.view(scale_out_blocks * out_block_size, scale_in_blocks * in_block_size)
+    weight_dequant = weight_dequant[:out_features, :in_features]
+    
+    return weight_dequant.to(torch.bfloat16)
+
+
+def quantize_weight_to_fp8(
+    weight_bf16: torch.Tensor,
+    block_size: int = 128,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize BF16 weight to FP8 using block-wise scaling.
+    
+    Args:
+        weight_bf16: [out_features, in_features] in BF16
+        block_size: Block size for quantization (default 128 for DeepSeek)
+    
+    Returns:
+        weight_fp8: [out_features, in_features] in FP8
+        scale_inv: [out_features/block_size, in_features/block_size] in FP32
+    """
+    out_features, in_features = weight_bf16.shape
+    
+    # Calculate number of blocks
+    out_blocks = (out_features + block_size - 1) // block_size
+    in_blocks = (in_features + block_size - 1) // block_size
+    
+    # Pad if necessary
+    pad_out = out_blocks * block_size - out_features
+    pad_in = in_blocks * block_size - in_features
+    if pad_out > 0 or pad_in > 0:
+        weight_bf16 = torch.nn.functional.pad(weight_bf16, (0, pad_in, 0, pad_out))
+    
+    # Convert to float32 for computation
+    weight_f32 = weight_bf16.to(torch.float32)
+    
+    # Reshape to blocks
+    weight_blocked = weight_f32.view(out_blocks, block_size, in_blocks, block_size)
+    
+    # Compute max absolute value per block for scaling
+    # FP8 E4M3 range: [-448, 448]
+    fp8_max = 448.0
+    block_max = weight_blocked.abs().amax(dim=(1, 3), keepdim=True)  # [out_blocks, 1, in_blocks, 1]
+    
+    # Compute scale: scale = max_val / fp8_max
+    # scale_inv = fp8_max / max_val (what we store)
+    scale = block_max / fp8_max
+    scale = scale.clamp(min=1e-12)  # Avoid division by zero
+    scale_inv = 1.0 / scale
+    
+    # Quantize
+    weight_scaled = weight_blocked / scale
+    weight_scaled = weight_scaled.clamp(-fp8_max, fp8_max)
+    
+    # Reshape back
+    weight_scaled = weight_scaled.view(out_blocks * block_size, in_blocks * block_size)
+    scale_inv = scale_inv.squeeze(1).squeeze(-1)  # [out_blocks, in_blocks]
+    
+    # Remove padding
+    if pad_out > 0 or pad_in > 0:
+        weight_scaled = weight_scaled[:out_features, :in_features]
+    
+    # Convert to FP8
+    weight_fp8 = weight_scaled.to(torch.float8_e4m3fn)
+    
+    return weight_fp8, scale_inv.to(torch.float32)
+
+
+# ============================================================================
 # Model Components
 # ============================================================================
 
@@ -529,17 +643,39 @@ def load_mtp_weights_from_target(
         filepath = os.path.join(target_model_path, filename)
         print(f"  Loading: {filename}")
         
+        # Collect scale_inv tensors for FP8 dequantization
+        scale_inv_tensors = {}
+        
         with safe_open(filepath, framework="pt", device="cpu") as f:
+            # First pass: collect scale_inv tensors
+            for key in f.keys():
+                if "weight_scale_inv" in key and f"layers.{61}" in key:
+                    scale_inv_tensors[key] = f.get_tensor(key)
+            
+            # Second pass: load weights
             for key in keys:
                 if key not in [k for k in f.keys()]:
                     continue
+                if "weight_scale_inv" in key:
+                    continue  # Skip scale tensors, handled separately
                     
                 tensor = f.get_tensor(key)
                 
-                # Skip FP8 quantized weights
+                # Dequantize FP8 weights to BF16 for training
                 if tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-                    stats["skipped"] += 1
-                    continue
+                    scale_key = key.replace(".weight", ".weight_scale_inv")
+                    if scale_key in scale_inv_tensors:
+                        scale_inv = scale_inv_tensors[scale_key]
+                        # Dequantize: weight_bf16 = weight_fp8 * scale
+                        # scale_inv is stored, so we need to use it directly
+                        # The scale_inv has shape [out_features/block_size, in_features/block_size]
+                        # where block_size is typically 128
+                        tensor = dequantize_fp8_weight(tensor, scale_inv)
+                        stats["dequantized"] = stats.get("dequantized", 0) + 1
+                    else:
+                        # No scale found, convert directly
+                        tensor = tensor.to(torch.bfloat16)
+                        stats["converted"] = stats.get("converted", 0) + 1
                 
                 mapped_key = map_weight_name(key)
                 if mapped_key is None:

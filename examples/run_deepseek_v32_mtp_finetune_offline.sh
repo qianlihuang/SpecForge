@@ -146,10 +146,14 @@ echo ""
 echo "[Step 3/3] Exporting model for EAGLE deployment..."
 echo "============================================"
 
+# Export with FP8 quantization by default (matches original model format)
+QUANTIZE_FLAG=${QUANTIZE_TO_FP8:-"--quantize-to-fp8"}
+
 python $ROOT_DIR/scripts/export_mtp_model_full.py \
     --checkpoint-dir $OUTPUT_DIR/checkpoint-epoch-$NUM_EPOCHS \
     --target-model-path $TARGET_MODEL_PATH \
-    --output-dir $EXPORT_DIR
+    --output-dir $EXPORT_DIR \
+    $QUANTIZE_FLAG
 
 echo ""
 echo "============================================"

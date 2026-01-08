@@ -13,7 +13,8 @@ Usage:
     python scripts/export_mtp_model_full.py \
         --checkpoint-dir outputs/deepseek-v32-mtp-full/checkpoint-epoch-3 \
         --target-model-path /data/models/DeepSeek-V3.2 \
-        --output-dir outputs/deepseek-v32-mtp-eagle
+        --output-dir outputs/deepseek-v32-mtp-eagle \
+        --quantize-to-fp8  # Optional: quantize MoE weights to FP8
 """
 
 import argparse
@@ -22,11 +23,57 @@ import os
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+from tqdm import tqdm
+
+
+def quantize_weight_to_fp8(
+    weight_bf16: torch.Tensor,
+    block_size: int = 128,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize BF16 weight to FP8 using block-wise scaling."""
+    out_features, in_features = weight_bf16.shape
+    out_blocks = (out_features + block_size - 1) // block_size
+    in_blocks = (in_features + block_size - 1) // block_size
+    
+    pad_out = out_blocks * block_size - out_features
+    pad_in = in_blocks * block_size - in_features
+    if pad_out > 0 or pad_in > 0:
+        weight_bf16 = torch.nn.functional.pad(weight_bf16, (0, pad_in, 0, pad_out))
+    
+    weight_f32 = weight_bf16.to(torch.float32)
+    weight_blocked = weight_f32.view(out_blocks, block_size, in_blocks, block_size)
+    
+    fp8_max = 448.0
+    block_max = weight_blocked.abs().amax(dim=(1, 3), keepdim=True)
+    scale = block_max / fp8_max
+    scale = scale.clamp(min=1e-12)
+    scale_inv = 1.0 / scale
+    
+    weight_scaled = weight_blocked / scale
+    weight_scaled = weight_scaled.clamp(-fp8_max, fp8_max)
+    weight_scaled = weight_scaled.view(out_blocks * block_size, in_blocks * block_size)
+    scale_inv = scale_inv.squeeze(1).squeeze(-1)
+    
+    if pad_out > 0 or pad_in > 0:
+        weight_scaled = weight_scaled[:out_features, :in_features]
+    
+    return weight_scaled.to(torch.float8_e4m3fn), scale_inv.to(torch.float32)
+
+
+def should_quantize_to_fp8(key: str) -> bool:
+    """Check if a weight should be quantized to FP8."""
+    if "mlp.experts." in key and any(x in key for x in ["gate_proj.weight", "up_proj.weight", "down_proj.weight"]):
+        if "weight_scale_inv" not in key:
+            return True
+    if "mlp.shared_experts" in key and any(x in key for x in ["gate_proj.weight", "up_proj.weight", "down_proj.weight"]):
+        if "weight_scale_inv" not in key:
+            return True
+    return False
 
 
 def parse_args():
@@ -38,8 +85,10 @@ def parse_args():
                        help="Path to original DeepSeek-V3.2 model")
     parser.add_argument("--output-dir", type=str, required=True,
                        help="Output directory")
-    parser.add_argument("--use-original-fp8", action="store_true",
-                       help="Use original FP8 weights instead of converting to bf16")
+    parser.add_argument("--quantize-to-fp8", action="store_true",
+                       help="Quantize MoE weights to FP8 (reduces size by ~50%%)")
+    parser.add_argument("--block-size", type=int, default=128,
+                       help="Block size for FP8 quantization")
     
     return parser.parse_args()
 
@@ -181,23 +230,50 @@ def export_model(args):
             files_to_load[filename].append(weight_name)
     
     output_weights = {}
+    stats = {"finetuned": 0, "original": 0, "quantized": 0}
     
-    for filename, keys in sorted(files_to_load.items()):
+    for filename, keys in tqdm(sorted(files_to_load.items()), desc="Loading weights"):
         filepath = os.path.join(args.target_model_path, filename)
-        print(f"  Loading: {filename}")
         
         with safe_open(filepath, framework="pt", device="cpu") as f:
             for key in f.keys():
                 if key not in keys:
                     continue
                 
+                # Skip scale_inv if we're using finetuned weights that need requantization
+                if "weight_scale_inv" in key:
+                    base_key = key.replace("_scale_inv", "")
+                    if base_key in finetuned_weights:
+                        # Will regenerate scale_inv after quantization
+                        continue
+                    else:
+                        # Keep original scale_inv
+                        output_weights[key] = f.get_tensor(key)
+                    continue
+                
                 # Use fine-tuned weight if available
                 if key in finetuned_weights:
-                    output_weights[key] = finetuned_weights[key]
-                    print(f"    Using fine-tuned: {key}")
+                    tensor = finetuned_weights[key]
+                    stats["finetuned"] += 1
+                    
+                    # Quantize to FP8 if requested
+                    if args.quantize_to_fp8 and should_quantize_to_fp8(key):
+                        if tensor.dtype in [torch.bfloat16, torch.float32, torch.float16]:
+                            weight_fp8, scale_inv = quantize_weight_to_fp8(tensor, args.block_size)
+                            output_weights[key] = weight_fp8
+                            scale_key = key.replace(".weight", ".weight_scale_inv")
+                            output_weights[scale_key] = scale_inv
+                            stats["quantized"] += 1
+                        else:
+                            output_weights[key] = tensor
+                    else:
+                        output_weights[key] = tensor
                 else:
+                    # Use original weight
                     output_weights[key] = f.get_tensor(key)
+                    stats["original"] += 1
     
+    print(f"  Stats: finetuned={stats['finetuned']}, original={stats['original']}, quantized={stats['quantized']}")
     print(f"  Total weights: {len(output_weights)}")
     
     # Save weights
@@ -212,7 +288,7 @@ def export_model(args):
     saved_files = []
     final_weight_map = {}
     
-    for key, tensor in sorted(output_weights.items()):
+    for key, tensor in tqdm(sorted(output_weights.items()), desc="Saving"):
         tensor_size = tensor.numel() * tensor.element_size()
         
         if current_file_size + tensor_size > MAX_FILE_SIZE and current_file_weights:
@@ -221,7 +297,6 @@ def export_model(args):
             saved_files.append(filename)
             for k in current_file_weights:
                 final_weight_map[k] = filename
-            print(f"    Saved: {filename}")
             
             current_file_weights = {}
             current_file_size = 0
