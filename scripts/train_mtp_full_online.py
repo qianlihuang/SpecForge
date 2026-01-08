@@ -644,9 +644,11 @@ def train_online(args):
     
     sglang_args = SGLangBackendArgs.from_args(args)
     target_model = get_eagle3_target_model(
-        model_path=args.target_model_path,
-        tp_size=args.tp_size,
-        sglang_args=sglang_args,
+        pretrained_model_name_or_path=args.target_model_path,
+        backend="sglang",
+        torch_dtype=config.torch_dtype if hasattr(config, 'torch_dtype') else torch.bfloat16,
+        device="cuda",
+        **sglang_args.to_kwargs(),
     )
     
     # Create MTP model
@@ -688,23 +690,33 @@ def train_online(args):
         for batch_idx, batch in enumerate(progress_bar):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch.get("attention_mask")
+            loss_mask = batch.get("loss_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
+            if loss_mask is not None:
+                loss_mask = loss_mask.to(device)
             
-            # Get hidden states from target model (layer 60)
+            # Get hidden states from target model using extend()
+            # return_last_hidden_states=True gives us the final hidden states (layer 60 output)
             with torch.no_grad():
-                hidden_states = target_model.get_hidden_states(
+                _, _, _, last_hidden_states_list = target_model.extend(
                     input_ids=input_ids,
-                    layer_idx=60,  # Get output of layer 60
+                    attention_mask=attention_mask if attention_mask is not None else torch.ones_like(input_ids),
+                    loss_mask=loss_mask if loss_mask is not None else torch.ones_like(input_ids),
+                    return_last_hidden_states=True,
+                    return_logits=False,
                 )
+                # Stack the hidden states from the list (each element is [seq_len, hidden_size])
+                hidden_states = torch.stack([h for h in last_hidden_states_list], dim=0)
                 hidden_states = hidden_states.to(device).to(torch.bfloat16)
             
             # Forward pass
             outputs = mtp_model(
                 input_ids=input_ids,
                 hidden_states=hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=None,  # MTP model handles causal masking internally
                 labels=input_ids,
+                loss_mask=loss_mask,
             )
             
             loss = outputs["loss"] / args.gradient_accumulation_steps

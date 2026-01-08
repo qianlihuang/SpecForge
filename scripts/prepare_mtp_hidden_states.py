@@ -336,10 +336,13 @@ class MTPHiddenStatesGenerator:
             # Move to GPU
             filtered_batch_gpu = {k: v.cuda(non_blocking=True) for k, v in filtered_batch.items()}
 
-            # Get hidden states (from layer 59) and logits
-            _, logits_list, aux_hidden_states_list, _ = self.model.extend(
+            # Get hidden states from FINAL layer (layer 60 output) for MTP training
+            # Note: MTP layer (layer 61) takes the output of layer 60 as input
+            # We use return_last_hidden_states=True to get the FINAL hidden states
+            # (after all decoder layers, before lm_head)
+            _, logits_list, _, last_hidden_states_list = self.model.extend(
                 **filtered_batch_gpu,
-                return_last_hidden_states=False,
+                return_last_hidden_states=True,  # Get final hidden states for MTP
                 return_logits=True,
             )
 
@@ -347,7 +350,7 @@ class MTPHiddenStatesGenerator:
 
             if is_tp_rank_0():
                 for i, (current_global_idx, hidden_states, logits) in enumerate(
-                    zip(sample_global_indices, aux_hidden_states_list, logits_list)
+                    zip(sample_global_indices, last_hidden_states_list, logits_list)
                 ):
                     # Create data point
                     data_point = MTPDataPoint(
@@ -365,7 +368,7 @@ class MTPHiddenStatesGenerator:
 
                 total_processed += len(sample_global_indices)
 
-            del aux_hidden_states_list, logits_list, filtered_batch
+            del last_hidden_states_list, logits_list, filtered_batch
 
             if batch_idx % 5 == 0:
                 torch.cuda.empty_cache()
